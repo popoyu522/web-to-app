@@ -4,12 +4,6 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.RectF
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -52,51 +46,14 @@ class ApkBuilder(private val context: Context) {
     private val originalAppName = "WebToApp\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B\u200B"
     private val originalPackageName = "com.webtoapp"
 
-    // 模板 APK 中常见的 Launcher 图标路径（按 dpi 列出），用于生成合适尺寸的 PNG
-    // 包含两种目录格式：带 -v4 后缀（AAPT2）和不带后缀（某些工具链）
-    private val ICON_PATHS = listOf(
-        // 带 -v4 后缀（AAPT2 默认）
-        "res/mipmap-mdpi-v4/ic_launcher.png" to 48,
-        "res/mipmap-hdpi-v4/ic_launcher.png" to 72,
-        "res/mipmap-xhdpi-v4/ic_launcher.png" to 96,
-        "res/mipmap-xxhdpi-v4/ic_launcher.png" to 144,
-        "res/mipmap-xxxhdpi-v4/ic_launcher.png" to 192,
-        // 不带 -v4 后缀（某些工具链/手动构建）
-        "res/mipmap-mdpi/ic_launcher.png" to 48,
-        "res/mipmap-hdpi/ic_launcher.png" to 72,
-        "res/mipmap-xhdpi/ic_launcher.png" to 96,
-        "res/mipmap-xxhdpi/ic_launcher.png" to 144,
-        "res/mipmap-xxxhdpi/ic_launcher.png" to 192
-    )
-
-    private val ROUND_ICON_PATHS = listOf(
-        // 带 -v4 后缀
-        "res/mipmap-mdpi-v4/ic_launcher_round.png" to 48,
-        "res/mipmap-hdpi-v4/ic_launcher_round.png" to 72,
-        "res/mipmap-xhdpi-v4/ic_launcher_round.png" to 96,
-        "res/mipmap-xxhdpi-v4/ic_launcher_round.png" to 144,
-        "res/mipmap-xxxhdpi-v4/ic_launcher_round.png" to 192,
-        // 不带 -v4 后缀
-        "res/mipmap-mdpi/ic_launcher_round.png" to 48,
-        "res/mipmap-hdpi/ic_launcher_round.png" to 72,
-        "res/mipmap-xhdpi/ic_launcher_round.png" to 96,
-        "res/mipmap-xxhdpi/ic_launcher_round.png" to 144,
-        "res/mipmap-xxxhdpi/ic_launcher_round.png" to 192
-    )
-
-    // 记录当前构建过程中已写入的 ZIP 条目，避免 duplicate entry
-    private val writtenEntryNames = mutableSetOf<String>()
-
     /**
      * 构建 APK
      * @param webApp WebApp 配置
-     * @param themeType 主题类型名称（对应 AppThemeType 枚举的 name）
      * @param onProgress 进度回调 (0-100)
      * @return 构建结果
      */
     suspend fun buildApk(
         webApp: WebApp,
-        themeType: String = "AURORA",
         onProgress: (Int, String) -> Unit = { _, _ -> }
     ): BuildResult = withContext(Dispatchers.IO) {
         try {
@@ -109,23 +66,10 @@ class ApkBuilder(private val context: Context) {
             Log.d("ApkBuilder", "  splashMediaPath=${webApp.getSplashMediaPath()}")
             
             // 生成包名（优先使用自定义包名，否则基于应用名自动生成）
-            // 注意：包名长度必须正好等于原始包名 "com.webtoapp"（12字符），否则 AXML 修改会失败
-            val customPkg = webApp.apkExportConfig?.customPackageName?.lowercase()?.takeIf { pkg ->
-                pkg.isNotBlank() && 
-                pkg.length <= originalPackageName.length &&  // 初步长度检查
-                pkg.matches(Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"))
-            }?.let { pkg ->
-                // 如果包名短于 12 字符，自动填充到 12 字符
-                padPackageName(pkg, originalPackageName.length)
-            }
-            val packageName = customPkg ?: generatePackageName(webApp.name)
-            
-            Log.d("ApkBuilder", "包名配置: custom=${webApp.apkExportConfig?.customPackageName}, " +
-                    "used=$packageName, maxLen=${originalPackageName.length}")
-            Log.d("ApkBuilder", "版本配置: code=${webApp.apkExportConfig?.customVersionCode}, " +
-                    "name=${webApp.apkExportConfig?.customVersionName}")
-            
-            val config = webApp.toApkConfig(packageName, themeType)
+            val packageName = webApp.apkExportConfig?.customPackageName?.takeIf { 
+                it.isNotBlank() && it.matches(Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"))
+            } ?: generatePackageName(webApp.name)
+            val config = webApp.toApkConfig(packageName)
             
             onProgress(10, "检查模板...")
             
@@ -159,14 +103,6 @@ class ApkBuilder(private val context: Context) {
             } else {
                 emptyList()
             }
-
-            // 加载自定义图标（如果有）
-            val iconBitmap = loadIconBitmap(webApp)
-            if (iconBitmap == null) {
-                Log.d("ApkBuilder", "未配置自定义图标或加载失败，将使用模板图标: iconPath=${webApp.iconPath}")
-            } else {
-                Log.d("ApkBuilder", "已加载自定义图标: path=${webApp.iconPath}, size=${iconBitmap.width}x${iconBitmap.height}")
-            }
             
             // 获取 BGM 播放列表的原始路径
             val bgmPlaylistPaths = if (webApp.bgmEnabled) {
@@ -184,13 +120,13 @@ class ApkBuilder(private val context: Context) {
             
             // 修改 APK 内容
             modifyApk(
-                templateApk, unsignedApk, config,
+                templateApk, unsignedApk, config, webApp.iconPath, 
                 webApp.getSplashMediaPath(), mediaContentPath,
-                bgmPlaylistPaths, bgmLrcDataList, htmlFiles, iconBitmap
+                bgmPlaylistPaths, bgmLrcDataList, htmlFiles
             ) { progress ->
                 onProgress(30 + (progress * 0.4).toInt(), "处理资源...")
             }
-
+            
             onProgress(70, "签名 APK...")
             
             // 检查未签名 APK 是否有效
@@ -225,20 +161,14 @@ class ApkBuilder(private val context: Context) {
             }
 
             onProgress(85, "验证 APK...")
-
+            
             // 调试：在安装前用 PackageManager 预解析一次 APK，检查包信息
             val parseResult = debugApkStructure(signedApk)
             if (!parseResult) {
                 Log.w("ApkBuilder", "APK 预解析失败，可能无法安装")
                 // 不返回错误，让用户尝试安装看具体错误
             }
-
-            // 图标自检：对比 APK 内图标和用户图标
-            debugIconSelfCheck(signedApk, iconBitmap)
-
-            // 释放图标 Bitmap
-            iconBitmap?.recycle()
-
+            
             onProgress(90, "清理临时文件...")
             
             // 清理
@@ -276,26 +206,25 @@ class ApkBuilder(private val context: Context) {
      * 1. 注入配置文件
      * 2. 修改包名
      * 3. 修改应用名
-     * 4. 嵌入启动画面媒体
-     * 5. 嵌入媒体应用内容
+     * 4. 替换/添加图标
+     * 5. 嵌入启动画面媒体
+     * 6. 嵌入媒体应用内容
      */
     private fun modifyApk(
         sourceApk: File,
         outputApk: File,
         config: ApkConfig,
+        iconPath: String?,
         splashMediaPath: String?,
         mediaContentPath: String? = null,
         bgmPlaylistPaths: List<String> = emptyList(),
         bgmLrcDataList: List<LrcData?> = emptyList(),
         htmlFiles: List<com.webtoapp.data.model.HtmlFile> = emptyList(),
-        iconBitmap: Bitmap? = null,
         onProgress: (Int) -> Unit
     ) {
+        val iconBitmap = iconPath?.let { template.loadBitmap(it) }
         var hasConfigFile = false
-        // 每次构建前重置已写入条目集合
-        writtenEntryNames.clear()
-        // 记录在循环过程中实际被替换过的 PNG 图标路径，用于判断是否需要主动添加整套 PNG 图标
-        val replacedIconPaths = mutableSetOf<String>()
+        val replacedIconPaths = mutableSetOf<String>() // 记录已替换的图标路径
         
         ZipFile(sourceApk).use { zipIn ->
             ZipOutputStream(FileOutputStream(outputApk)).use { zipOut ->
@@ -322,14 +251,11 @@ class ApkBuilder(private val context: Context) {
                         entry.name.startsWith("assets/splash_media.") -> {
                             Log.d("ApkBuilder", "跳过旧启动画面媒体: ${entry.name}")
                         }
-
-                        // 修改 AndroidManifest.xml（修改包名 + 版本号）
+                        
+                        // 修改 AndroidManifest.xml（修改包名）
                         entry.name == "AndroidManifest.xml" -> {
                             val originalData = zipIn.getInputStream(entry).readBytes()
-                            // 1. 修改包名
-                            var modifiedData = axmlEditor.modifyPackageName(originalData, config.packageName)
-                            // 2. 修改版本号和版本名
-                            modifiedData = axmlEditor.modifyVersion(modifiedData, config.versionCode, config.versionName)
+                            val modifiedData = axmlEditor.modifyPackageName(originalData, config.packageName)
                             writeEntryDeflated(zipOut, entry.name, modifiedData)
                         }
                         
@@ -342,20 +268,9 @@ class ApkBuilder(private val context: Context) {
                                 originalAppName,
                                 config.appName
                             )
-                            // 与 AppCloner 保持一致：强制将 Adaptive Icon 相关路径从 .xml 改为 .png
-                            modifiedData = arscEditor.forceReplaceIconPaths(modifiedData)
+                            // 让 @mipmap/ic_launcher* 从 .xml 改为 .png，便于使用位图图标
+                            modifiedData = arscEditor.modifyIconPathsToPng(modifiedData)
                             writeEntryStored(zipOut, entry.name, modifiedData)
-                        }
-
-                        // 注意：不再处理 Adaptive Icon XML！
-                        // 旧版本的正确做法是：保留 XML 定义，只通过 ARSC 路径替换来改变 foreground
-                        // 这样 Adaptive Icon 结构保持完整，系统会正确解析 foreground 和 background
-
-                        // 使用自定义图标替换 Launcher 图标 PNG
-                        iconBitmap != null && isIconEntry(entry.name) -> {
-                            Log.d("ApkBuilder", "替换图标资源: ${entry.name}")
-                            replaceIconEntry(zipOut, entry.name, iconBitmap)
-                            replacedIconPaths.add(entry.name)
                         }
                         
                         // 替换/添加配置文件
@@ -364,7 +279,13 @@ class ApkBuilder(private val context: Context) {
                             writeConfigEntry(zipOut, config)
                         }
                         
-                        // 其他文件照常复制
+                        // 替换图标（如果 APK 中存在 PNG 图标）
+                        iconBitmap != null && isIconEntry(entry.name) -> {
+                            replaceIconEntry(zipOut, entry.name, iconBitmap)
+                            replacedIconPaths.add(entry.name)
+                        }
+                        
+                        // 复制其他文件
                         else -> {
                             copyEntry(zipIn, zipOut, entry)
                         }
@@ -373,10 +294,18 @@ class ApkBuilder(private val context: Context) {
                 
                 // 如果原 APK 没有配置文件，添加一个
                 if (!hasConfigFile) {
-                    Log.d("ApkBuilder", "原 APK 没有配置文件，添加新配置文件到: ${ApkTemplate.CONFIG_PATH}")
                     writeConfigEntry(zipOut, config)
-                } else {
-                    Log.d("ApkBuilder", "已替换原有配置文件")
+                }
+                
+                // 如果有图标但 APK 中没有 PNG 图标文件，主动添加
+                if (iconBitmap != null && replacedIconPaths.isEmpty()) {
+                    addIconsToApk(zipOut, iconBitmap)
+                }
+
+                // 为使用 adaptive icon 的模板添加前景 PNG 图标
+                // 无条件写入，因为 release 版 APK 的前景图可能被编译到不同路径
+                if (iconBitmap != null) {
+                    addAdaptiveIconPngs(zipOut, iconBitmap, entryNames)
                 }
 
                 // 嵌入启动画面媒体文件
@@ -402,20 +331,10 @@ class ApkBuilder(private val context: Context) {
                 if (config.appType == "HTML" && htmlFiles.isNotEmpty()) {
                     addHtmlFilesToAssets(zipOut, htmlFiles)
                 }
-
-                // 图标处理逻辑：与 AppCloner/旧项目保持一致
-                if (iconBitmap != null) {
-                    // 如果循环过程中没有任何 PNG 图标被实际替换，说明模板 APK 里没有可直接替换的 PNG 图标
-                    // 这种情况下，主动补齐一整套 PNG 图标（mipmap-*/ic_launcher*.png）
-                    if (replacedIconPaths.isEmpty()) {
-                        addMissingIconPngs(zipOut, iconBitmap, entryNames)
-                    }
-
-                    // 无论是否替换过 PNG 图标，都为 adaptive icon 写入前景 PNG（ic_launcher_foreground.png 等）
-                    addAdaptiveIconPngs(zipOut, iconBitmap, entryNames)
-                }
             }
         }
+        
+        iconBitmap?.recycle()
     }
 
     /**
@@ -468,10 +387,6 @@ class ApkBuilder(private val context: Context) {
      * 用于启动画面媒体等需要被 AssetManager.openFd() 读取的文件
      */
     private fun writeEntryStoredSimple(zipOut: ZipOutputStream, name: String, data: ByteArray) {
-        if (!writtenEntryNames.add(name)) {
-            Log.w("ApkBuilder", "检测到重复条目(忽略写入 STORED simple): $name")
-            return
-        }
         val entry = ZipEntry(name)
         entry.method = ZipEntry.STORED
         entry.size = data.size.toLong()
@@ -582,7 +497,7 @@ class ApkBuilder(private val context: Context) {
             }
         }
     }
-
+    
     /**
      * 将 HTML 文件添加到 assets/html 目录
      * HTML/CSS/JS 文件使用 DEFLATED 压缩（文本文件压缩效果好）
@@ -685,63 +600,60 @@ class ApkBuilder(private val context: Context) {
             false
         }
     }
-
+    
     /**
-     * 图标自检：对比用户图标与 APK 内各密度图标
-     * 目的：用事实确认 APK 里写入的 PNG 是否已经被“抹成纯色”，还是保持了原始图案
+     * 主动添加 PNG 图标到 APK
+     * 当原 APK 中没有 PNG 图标时使用
      */
-    private fun debugIconSelfCheck(apkFile: File, userIcon: Bitmap?) {
-        if (userIcon == null) {
-            Log.d("ApkBuilder", "图标自检跳过：userIcon == null")
-            return
+    private fun addIconsToApk(zipOut: ZipOutputStream, bitmap: Bitmap) {
+        // 添加所有尺寸的普通图标
+        ApkTemplate.ICON_PATHS.forEach { (path, size) ->
+            val iconBytes = template.scaleBitmapToPng(bitmap, size)
+            writeEntryDeflated(zipOut, path, iconBytes)
         }
-
-        try {
-            Log.d("ApkBuilder", "======== 图标自检: APK 内图标与用户图标对比 ========")
-            Log.d(
-                "ApkBuilder",
-                "用户图标: size=${userIcon.width}x${userIcon.height}, firstPixel=#${Integer.toHexString(userIcon.getPixel(userIcon.width / 2, userIcon.height / 2))}"
-            )
-
-            val iconPaths = listOf(
-                "res/mipmap-xxxhdpi-v4/ic_launcher.png",
-                "res/mipmap-xxhdpi-v4/ic_launcher.png",
-                "res/mipmap-xhdpi-v4/ic_launcher.png",
-                "res/mipmap-hdpi-v4/ic_launcher.png",
-                "res/mipmap-mdpi-v4/ic_launcher.png",
-                "res/mipmap-xxxhdpi-v4/ic_launcher_round.png",
-                "res/mipmap-xxhdpi-v4/ic_launcher_round.png"
-            )
-
-            ZipFile(apkFile).use { zip ->
-                iconPaths.forEach { path ->
-                    val entry = zip.getEntry(path) ?: return@forEach
-                    val data = zip.getInputStream(entry).readBytes()
-                    val bmp = BitmapFactory.decodeByteArray(data, 0, data.size) ?: return@forEach
-
-                    val pixel = bmp.getPixel(bmp.width / 2, bmp.height / 2)
-                    Log.d(
-                        "ApkBuilder",
-                        "APK 图标: path=$path, size=${bmp.width}x${bmp.height}, bytes=${data.size}, firstPixel=#${Integer.toHexString(pixel)}"
-                    )
-                    bmp.recycle()
-                }
-            }
-
-            Log.d("ApkBuilder", "======== 图标自检结束 ========")
-        } catch (e: Exception) {
-            Log.e("ApkBuilder", "图标自检过程中发生异常: ${e.message}", e)
+        
+        // 添加所有尺寸的圆形图标
+        ApkTemplate.ROUND_ICON_PATHS.forEach { (path, size) ->
+            val iconBytes = template.createRoundIcon(bitmap, size)
+            writeEntryDeflated(zipOut, path, iconBytes)
         }
     }
 
     /**
+     * 为 adaptive icon 的前景创建 PNG 版本
+     * 在 res/drawable 目录下写入 ic_launcher_foreground.png，
+     * 并配合 ArscEditor.modifyIconPathsToPng 将路径从 .xml 切换到 .png
+     * 
+     * 注意：遵循 Android Adaptive Icon 规范，图标会被放置在安全区域（中间 72dp），
+     * 周围保留 18dp 边距，避免被形状遮罩裁剪导致图标看起来被放大
+     */
+    private fun addAdaptiveIconPngs(
+        zipOut: ZipOutputStream,
+        bitmap: Bitmap,
+        existingEntryNames: Set<String>
+    ) {
+        val bases = listOf(
+            "res/drawable/ic_launcher_foreground",
+            "res/drawable-v24/ic_launcher_foreground",
+            "res/drawable-anydpi-v24/ic_launcher_foreground"
+        )
+
+        // 使用 xxxhdpi 尺寸（432px）确保高清晰度，系统会自动缩放到其他 dpi
+        // 108dp * 4 (xxxhdpi) = 432px
+        val iconBytes = template.createAdaptiveForegroundIcon(bitmap, 432)
+
+        bases.forEach { base ->
+            val pngPath = "${base}.png"
+            if (!existingEntryNames.contains(pngPath)) {
+                writeEntryDeflated(zipOut, pngPath, iconBytes)
+            }
+        }
+    }
+    
+    /**
      * 写入条目（使用 DEFLATED 压缩格式）
      */
     private fun writeEntryDeflated(zipOut: ZipOutputStream, name: String, data: ByteArray) {
-        if (!writtenEntryNames.add(name)) {
-            Log.w("ApkBuilder", "检测到重复条目(忽略写入): $name")
-            return
-        }
         val entry = ZipEntry(name)
         entry.method = ZipEntry.DEFLATED
         zipOut.putNextEntry(entry)
@@ -750,271 +662,10 @@ class ApkBuilder(private val context: Context) {
     }
 
     /**
-     * 判断是否为需要替换的 Launcher 图标 PNG 资源
-     * 
-     * 注意：ic_launcher_background 不应该被替换！
-     * 因为 Adaptive Icon 的 background 层会被系统裁剪显示，
-     * 如果用用户图标替换 background，会导致只显示图片中心区域（看起来像纯色）。
-     * 正确的做法是只替换 foreground，保持 background 原样。
-     */
-    private fun isIconEntry(entryName: String): Boolean {
-        // 精确匹配常见路径
-        if (ICON_PATHS.any { it.first == entryName } ||
-            ROUND_ICON_PATHS.any { it.first == entryName }) {
-            return true
-        }
-
-        // 模糊匹配：检测所有可能的图标 PNG 文件
-        // 支持各种路径格式：mipmap-xxxhdpi-v4, mipmap-xxxhdpi, drawable-xxxhdpi 等
-        // 注意：不匹配 ic_launcher_background.png，保持背景层原样
-        val iconPatterns = listOf(
-            "ic_launcher.png",
-            "ic_launcher_round.png",
-            "ic_launcher_foreground.png"
-            // 故意不包含 ic_launcher_background.png
-        )
-        return iconPatterns.any { pattern ->
-            entryName.endsWith(pattern) && 
-            (entryName.contains("mipmap") || entryName.contains("drawable"))
-        }
-    }
-
-    /**
-     * 使用自定义 Bitmap 替换单个图标条目
-     * 根据路径中的 dpi 信息推断尺寸，保证清晰度
-     * 
-     * 与旧版本保持一致：
-     * - 圆形图标使用 createRoundIcon
-     * - foreground 图标使用 createAdaptiveForegroundIcon（添加 safe zone 边距）
-     * - 普通图标使用 scaleBitmapToPng
-     */
-    private fun replaceIconEntry(zipOut: ZipOutputStream, entryName: String, bitmap: Bitmap) {
-        // 优先使用预定义尺寸
-        var size = ICON_PATHS.find { it.first == entryName }?.second
-            ?: ROUND_ICON_PATHS.find { it.first == entryName }?.second
-
-        // 如果预定义没有匹配，根据路径推断尺寸
-        if (size == null) {
-            size = when {
-                entryName.contains("xxxhdpi") -> 192
-                entryName.contains("xxhdpi") -> 144
-                entryName.contains("xhdpi") -> 96
-                entryName.contains("hdpi") -> 72
-                entryName.contains("mdpi") -> 48
-                entryName.contains("ldpi") -> 36
-                else -> 96
-            }
-        }
-
-        val iconBytes = when {
-            // 圆形图标
-            entryName.contains("round") -> {
-                createRoundIcon(bitmap, size)
-            }
-            // adaptive icon 前景图需要预留 safe zone 边距（关键！与旧版本一致）
-            entryName.contains("foreground") -> {
-                createAdaptiveForegroundIcon(bitmap, size)
-            }
-            // 普通图标
-            else -> {
-                scaleBitmapToPng(bitmap, size)
-            }
-        }
-
-        writeEntryDeflated(zipOut, entryName, iconBytes)
-    }
-
-    /**
-     * 按指定尺寸缩放并居中绘制到正方形 Bitmap，返回 PNG 字节数组
-     * 与 AppCloner 中保持一致：保持纵横比，居中放置
-     */
-    private fun scaleBitmapToPng(bitmap: Bitmap, size: Int): ByteArray {
-        // 完全对齐旧项目：直接缩放到 size x size
-        val scaled = Bitmap.createScaledBitmap(bitmap, size, size, true)
-        val baos = ByteArrayOutputStream()
-        scaled.compress(Bitmap.CompressFormat.PNG, 100, baos)
-        if (scaled != bitmap) {
-            scaled.recycle()
-        }
-        return baos.toByteArray()
-    }
-
-    /**
-     * 创建 Adaptive Icon 前景图
-     * 遵循 Android Adaptive Icon 规范：中间 72dp 为安全区域，周围保留 18dp 边距
-     */
-    private fun createAdaptiveForegroundIcon(bitmap: Bitmap, size: Int): ByteArray {
-        // 完全对齐旧项目实现
-        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(output)
-
-        // 计算安全区域尺寸（72/108 ≈ 66.67%）
-        val safeZoneSize = (size * 72f / 108f).toInt()
-        val padding = (size - safeZoneSize) / 2
-
-        // 将用户图标缩放到安全区域尺寸
-        val scaled = Bitmap.createScaledBitmap(bitmap, safeZoneSize, safeZoneSize, true)
-
-        // 居中绘制到画布
-        canvas.drawBitmap(scaled, padding.toFloat(), padding.toFloat(), null)
-
-        val baos = ByteArrayOutputStream()
-        output.compress(Bitmap.CompressFormat.PNG, 100, baos)
-
-        if (scaled != bitmap) scaled.recycle()
-        output.recycle()
-
-        return baos.toByteArray()
-    }
-
-    /**
-     * 创建圆形图标（用于 ic_launcher_round 系列）
-     * 与 AppCloner 中保持一致：保持纵横比，居中放置后套圆形蒙版
-     */
-    private fun createRoundIcon(bitmap: Bitmap, size: Int): ByteArray {
-        // 完全对齐旧项目实现：先缩放到 size x size，再套圆形蒙版
-        val scaled = Bitmap.createScaledBitmap(bitmap, size, size, true)
-        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-
-        val canvas = Canvas(output)
-        val paint = Paint().apply {
-            isAntiAlias = true
-            isFilterBitmap = true
-        }
-
-        // 绘制圆形
-        val rect = RectF(0f, 0f, size.toFloat(), size.toFloat())
-        canvas.drawOval(rect, paint)
-
-        // 设置混合模式
-        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_IN)
-        canvas.drawBitmap(scaled, 0f, 0f, paint)
-
-        val baos = ByteArrayOutputStream()
-        output.compress(Bitmap.CompressFormat.PNG, 100, baos)
-
-        if (scaled != bitmap) scaled.recycle()
-        output.recycle()
-
-        return baos.toByteArray()
-    }
-
-    /**
-     * 检测是否是 Adaptive Icon 入口 XML 文件
-     * 这些文件在 mipmap-anydpi-v26 目录下，定义了 adaptive-icon 结构
-     */
-    private fun isAdaptiveIconEntryXml(entryName: String): Boolean {
-        return entryName.contains("mipmap-anydpi") &&
-            (entryName.endsWith("ic_launcher.xml") || entryName.endsWith("ic_launcher_round.xml"))
-    }
-
-    /**
-     * 为 APK 补齐缺失的 PNG 图标（各 dpi 的 ic_launcher / ic_launcher_round）
-     * 注意：不再在这里生成 mipmap-anydpi-v26 图标，避免与循环中 XML->PNG 分支重复
-     */
-    private fun addMissingIconPngs(
-        zipOut: ZipOutputStream,
-        bitmap: Bitmap,
-        existingEntryNames: Set<String>
-    ) {
-        // 添加各 dpi 目录下的普通图标（如果还没有）
-        ICON_PATHS.forEach { (path, size) ->
-            if (!existingEntryNames.contains(path)) {
-                val iconBytes = scaleBitmapToPng(bitmap, size)
-                writeEntryDeflated(zipOut, path, iconBytes)
-                Log.d("ApkBuilder", "添加缺失图标: $path (${size}px)")
-            }
-        }
-
-        // 添加各 dpi 目录下的圆形图标（如果还没有）
-        ROUND_ICON_PATHS.forEach { (path, size) ->
-            if (!existingEntryNames.contains(path)) {
-                val iconBytes = createRoundIcon(bitmap, size)
-                writeEntryDeflated(zipOut, path, iconBytes)
-                Log.d("ApkBuilder", "添加缺失圆形图标: $path (${size}px)")
-            }
-        }
-    }
-
-    /**
-     * 为 adaptive icon 写入前景 PNG（ic_launcher_foreground.png）
-     * 配合 ArscEditor.forceReplaceIconPaths 使用
-     * 
-     * 覆盖所有可能的 foreground 路径：
-     * - drawable 系列：不同启动器/Android 版本可能读取不同目录
-     * - mipmap 系列：某些编译配置会把 foreground 放在 mipmap 下
-     */
-    private fun addAdaptiveIconPngs(
-        zipOut: ZipOutputStream,
-        bitmap: Bitmap,
-        existingEntryNames: Set<String>
-    ) {
-        // drawable 目录下的 foreground
-        val drawableBases = listOf(
-            "res/drawable/ic_launcher_foreground",
-            "res/drawable-v24/ic_launcher_foreground",
-            "res/drawable-anydpi-v24/ic_launcher_foreground"
-        )
-
-        // mipmap 目录下的 foreground（某些编译配置）
-        val mipmapBases = listOf(
-            "res/mipmap-mdpi/ic_launcher_foreground",
-            "res/mipmap-hdpi/ic_launcher_foreground",
-            "res/mipmap-xhdpi/ic_launcher_foreground",
-            "res/mipmap-xxhdpi/ic_launcher_foreground",
-            "res/mipmap-xxxhdpi/ic_launcher_foreground",
-            "res/mipmap-anydpi-v26/ic_launcher_foreground"
-        )
-
-        // 使用 xxxhdpi 尺寸（432px）确保高清晰度，系统会自动缩放到其他 dpi
-        val iconBytes = createAdaptiveForegroundIcon(bitmap, 432)
-
-        // 写入所有可能的路径
-        (drawableBases + mipmapBases).forEach { base ->
-            val pngPath = "$base.png"
-            if (!existingEntryNames.contains(pngPath)) {
-                writeEntryDeflated(zipOut, pngPath, iconBytes)
-                Log.d("ApkBuilder", "添加前景图: $pngPath")
-            }
-        }
-    }
-
-    /**
-     * 判断是否为需要在自定义图标场景下删除的 Adaptive Icon 相关资源
-     */
-    private fun shouldDeleteForCustomIcon(entryName: String): Boolean {
-        // 删除 mipmap-anydpi-v26 目录下的 launcher 相关 XML / PNG
-        if (entryName.startsWith("res/mipmap-anydpi-v26/") &&
-            (entryName.endsWith("ic_launcher.xml") ||
-             entryName.endsWith("ic_launcher_round.xml") ||
-             entryName.endsWith("ic_launcher.png") ||
-             entryName.endsWith("ic_launcher_round.png"))) {
-            return true
-        }
-
-        // 删除 foreground / background 相关资源（drawable/mipmap 下的 XML/PNG）
-        if ((entryName.startsWith("res/drawable") || entryName.startsWith("res/mipmap")) &&
-            (entryName.contains("ic_launcher_foreground") || entryName.contains("ic_launcher_background"))) {
-            return true
-        }
-
-        // 删除 values 中的 ic_launcher_background 定义
-        if (entryName.startsWith("res/values/") && entryName.contains("ic_launcher_background")) {
-            return true
-        }
-
-        return false
-    }
-
-    /**
      * 写入条目（使用 STORED 未压缩格式）
      * 用于 resources.arsc，满足 Android R+ 对未压缩和 4 字节对齐的要求
      */
     private fun writeEntryStored(zipOut: ZipOutputStream, name: String, data: ByteArray) {
-        if (!writtenEntryNames.add(name)) {
-            Log.w("ApkBuilder", "检测到重复条目(忽略写入 STORED): $name")
-            return
-        }
         val entry = ZipEntry(name)
         entry.method = ZipEntry.STORED
         entry.size = data.size.toLong()
@@ -1063,76 +714,77 @@ class ApkBuilder(private val context: Context) {
     }
 
     /**
+     * 检查是否是图标条目
+     * 匹配多种可能的图标路径格式
+     */
+    private fun isIconEntry(entryName: String): Boolean {
+        // 精确匹配预定义路径
+        if (ApkTemplate.ICON_PATHS.any { it.first == entryName } ||
+            ApkTemplate.ROUND_ICON_PATHS.any { it.first == entryName }) {
+            return true
+        }
+        
+        // 模糊匹配：检测所有可能的图标 PNG 文件
+        // 支持各种路径格式：mipmap-xxxhdpi-v4, mipmap-xxxhdpi, drawable-xxxhdpi 等
+        val iconPatterns = listOf(
+            "ic_launcher.png",
+            "ic_launcher_round.png",
+            "ic_launcher_foreground.png",
+            "ic_launcher_background.png"
+        )
+        return iconPatterns.any { pattern ->
+            entryName.endsWith(pattern) && 
+            (entryName.contains("mipmap") || entryName.contains("drawable"))
+        }
+    }
+
+    /**
+     * 替换图标条目
+     * 根据路径中的 dpi 信息推断图标尺寸
+     */
+    private fun replaceIconEntry(zipOut: ZipOutputStream, entryName: String, bitmap: Bitmap) {
+        // 优先使用预定义尺寸
+        var size = ApkTemplate.ICON_PATHS.find { it.first == entryName }?.second
+            ?: ApkTemplate.ROUND_ICON_PATHS.find { it.first == entryName }?.second
+        
+        // 如果预定义没有匹配，根据路径推断尺寸
+        if (size == null) {
+            size = when {
+                entryName.contains("xxxhdpi") -> 192
+                entryName.contains("xxhdpi") -> 144
+                entryName.contains("xhdpi") -> 96
+                entryName.contains("hdpi") -> 72
+                entryName.contains("mdpi") -> 48
+                entryName.contains("ldpi") -> 36
+                else -> 96
+            }
+        }
+        
+        val iconBytes = when {
+            // 圆形图标
+            entryName.contains("round") -> {
+                template.createRoundIcon(bitmap, size)
+            }
+            // adaptive icon 前景图需要预留 safe zone 边距
+            entryName.contains("foreground") -> {
+                template.createAdaptiveForegroundIcon(bitmap, size)
+            }
+            // 普通图标
+            else -> {
+                template.scaleBitmapToPng(bitmap, size)
+            }
+        }
+        
+        writeEntryDeflated(zipOut, entryName, iconBytes)
+    }
+
+    /**
      * 复制 ZIP 条目
      * 使用 DEFLATED 压缩方式确保兼容性
      */
     private fun copyEntry(zipIn: ZipFile, zipOut: ZipOutputStream, entry: ZipEntry) {
         val data = zipIn.getInputStream(entry).readBytes()
         writeEntryDeflated(zipOut, entry.name, data)
-    }
-
-    /**
-     * 从 WebApp.iconPath 加载 Bitmap
-     * 支持本地绝对路径、file:// 和 content:// 三种形式
-     */
-    private fun loadIconBitmap(webApp: WebApp): Bitmap? {
-        val path = webApp.iconPath ?: return null
-        return try {
-            when {
-                // 绝对路径
-                path.startsWith("/") -> {
-                    val file = File(path)
-                    if (file.exists()) BitmapFactory.decodeFile(path) else null
-                }
-                // file:// URI
-                path.startsWith("file://") -> {
-                    val uri = Uri.parse(path)
-                    val file = File(uri.path ?: return null)
-                    if (file.exists()) BitmapFactory.decodeFile(file.absolutePath) else null
-                }
-                // 兼容旧数据：按 content:// 处理
-                else -> {
-                    val uri = Uri.parse(path)
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        BitmapFactory.decodeStream(input)
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("ApkBuilder", "加载自定义图标失败: ${e.message}", e)
-            null
-        }
-    }
-
-    /**
-     * 将包名填充到指定长度
-     * 通过在最后一段添加字符来填充
-     * 例如：sh.shihao (9字符) -> sh.shihao.aa (12字符)
-     */
-    private fun padPackageName(pkg: String, targetLength: Int): String {
-        if (pkg.length >= targetLength) return pkg.take(targetLength)
-        
-        val diff = targetLength - pkg.length
-        
-        // 需要填充的字符数（包括一个点分隔符）
-        return when {
-            diff == 1 -> {
-                // 只差1个字符，无法添加新段（需要至少 ".a"），在最后一段追加字符
-                val lastDot = pkg.lastIndexOf('.')
-                if (lastDot > 0) {
-                    pkg.substring(0, lastDot + 1) + pkg.substring(lastDot + 1) + "a"
-                } else pkg + "a"
-            }
-            diff == 2 -> {
-                // 差2个字符，添加 ".a"
-                "$pkg.a"
-            }
-            else -> {
-                // 差3个或更多字符，添加点和填充字符
-                val padChars = "a".repeat(diff - 1)  // 减1是因为点占一个字符
-                "$pkg.$padChars"
-            }
-        }
     }
 
     /**
@@ -1235,17 +887,15 @@ class ApkBuilder(private val context: Context) {
 
 /**
  * WebApp 扩展函数：转换为 ApkConfig
- * @param packageName 包名
- * @param themeType 主题类型名称（对应 AppThemeType 枚举的 name）
  */
-fun WebApp.toApkConfig(packageName: String, themeType: String = "AURORA"): ApkConfig {
+fun WebApp.toApkConfig(packageName: String): ApkConfig {
     return ApkConfig(
         appName = name,
         packageName = packageName,
         targetUrl = url,
-        // 默认使用当前时间戳（秒）作为版本号，确保每次导出递增，避免"系统已存在较高版本"错误
-        versionCode = apkExportConfig?.customVersionCode ?: (System.currentTimeMillis() / 1000).toInt(),
+        versionCode = apkExportConfig?.customVersionCode ?: 1,
         versionName = apkExportConfig?.customVersionName?.takeIf { it.isNotBlank() } ?: "1.0.0",
+        iconPath = iconPath,
         activationEnabled = activationEnabled,
         activationCodes = activationCodes,
         adBlockEnabled = adBlockEnabled,
@@ -1254,15 +904,12 @@ fun WebApp.toApkConfig(packageName: String, themeType: String = "AURORA"): ApkCo
         announcementTitle = announcement?.title ?: "",
         announcementContent = announcement?.content ?: "",
         announcementLink = announcement?.linkUrl ?: "",
-        announcementButtonText = announcement?.buttonText ?: "",
-        announcementButtonUrl = announcement?.buttonUrl ?: "",
         javaScriptEnabled = webViewConfig.javaScriptEnabled,
         domStorageEnabled = webViewConfig.domStorageEnabled,
         zoomEnabled = webViewConfig.zoomEnabled,
         desktopMode = webViewConfig.desktopMode,
         userAgent = webViewConfig.userAgent,
         hideToolbar = webViewConfig.hideToolbar,
-        landscapeMode = webViewConfig.landscapeMode,
         injectScripts = webViewConfig.injectScripts,
         splashEnabled = splashEnabled,
         splashType = splashConfig?.type?.name ?: "IMAGE",
@@ -1312,10 +959,7 @@ fun WebApp.toApkConfig(packageName: String, themeType: String = "AURORA"): ApkCo
                 animationType = theme.animationType.name,
                 position = theme.position.name
             )
-        },
-        
-        // 主题配置
-        themeType = themeType
+        }
     )
 }
 

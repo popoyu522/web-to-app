@@ -196,7 +196,11 @@ class WebViewManager(
                 error: android.net.http.SslError?
             ) {
                 // 默认拒绝不安全的SSL连接
-                handler?.cancel()
+                //handler?.cancel()
+                //callbacks.onSslError(error?.toString() ?: "SSL Error")
+                // 完全接受任何SSL错误
+                handler?.proceed()
+                // 可选：记录错误但不阻止
                 callbacks.onSslError(error?.toString() ?: "SSL Error")
             }
         }
